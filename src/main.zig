@@ -4,6 +4,12 @@ const SDL = @import("sdl2");
 var screen: [240][320]u8 = undefined;
 var palette: [256]u32 = undefined;
 
+fn paintPixel(x: i32, y: i32, color: u8) void {
+    if (x >= 0 and y >= 0 and x < 320 and y < 240) {
+        screen[@intCast(usize, y)][@intCast(usize, x)] = color;
+    }
+}
+
 fn paintLine(x0: i32, y0: i32, x1: i32, y1: i32, color: u8) void {
     var dx = std.math.absInt(x1 - x0) catch unreachable;
     var sx = if (x0 < x1) @as(i32, 1) else -1;
@@ -15,9 +21,7 @@ fn paintLine(x0: i32, y0: i32, x1: i32, y1: i32, color: u8) void {
     var y = y0;
 
     while (true) {
-        if (x >= 0 and y >= 0 and x < 320 and y < 240) {
-            screen[@intCast(usize, y)][@intCast(usize, x)] = color;
-        }
+        paintPixel(x, y, color);
         if (x == x1 and y == y1)
             break;
         const e2 = 2 * err;
@@ -38,10 +42,132 @@ const Point = struct {
 };
 
 fn paintTriangle(points: [3]Point, fillColor: u8, borderColor: ?u8) void {
+    var localPoints = points;
+    std.sort.sort(
+        Point,
+        &localPoints,
+        struct {
+            fn lessThan(lhs: Point, rhs: Point) bool {
+                return lhs.y < rhs.y;
+            }
+        }.lessThan,
+    );
+
+    if (localPoints[0].y == localPoints[1].y and localPoints[0].y == localPoints[2].y) {
+        // this is actually a flat line m(
+        unreachable; // TODO: Fix this later some day
+        // return;
+    }
+
+    if (localPoints[0].y == localPoints[1].y) {
+        // triangle shape:
+        // o---o
+        //  \ /
+        //   o
+        const totalY = localPoints[2].y - localPoints[0].y;
+
+        var sy = localPoints[0].y;
+        var ly: i32 = 0;
+        while (sy <= localPoints[2].y) {
+            var x0 = localPoints[0].x + @divFloor(ly * (localPoints[2].x - localPoints[0].x), totalY);
+            var x1 = localPoints[1].x + @divFloor(ly * (localPoints[2].x - localPoints[1].x), totalY);
+
+            var x = std.math.min(x0, x1);
+            while (x <= std.math.max(x0, x1)) : (x += 1) {
+                paintPixel(x, sy, fillColor);
+            }
+
+            sy += 1;
+            ly += 1;
+        }
+    } else if (localPoints[1].y == localPoints[2].y) {
+        // triangle shape:
+        //   o
+        //  / \
+        // o---o
+        const totalY = localPoints[2].y - localPoints[0].y;
+
+        var sy = localPoints[0].y;
+        var ly: i32 = 0;
+        while (sy <= localPoints[1].y) {
+            var x0 = localPoints[0].x + @divFloor(ly * (localPoints[1].x - localPoints[0].x), totalY);
+            var x1 = localPoints[0].x + @divFloor(ly * (localPoints[2].x - localPoints[0].x), totalY);
+
+            var x = std.math.min(x0, x1);
+            while (x <= std.math.max(x0, x1)) : (x += 1) {
+                paintPixel(x, sy, fillColor);
+            }
+
+            sy += 1;
+            ly += 1;
+        }
+    } else {
+        // non-straightline triangle
+        //    o
+        //   / \
+        //  o---|
+        //   \  |
+        //    \ \
+        //     \|
+        //      o
+        const y0 = localPoints[0].y;
+        const y1 = localPoints[1].y;
+        const y2 = localPoints[2].y;
+
+        const deltaY01 = y1 - y0;
+        const deltaY12 = y2 - y1;
+        const deltaY02 = y2 - y0;
+        std.debug.assert(deltaY01 > 0);
+        std.debug.assert(deltaY12 > 0);
+
+        const pHelp: Point = .{
+            .x = localPoints[0].x + @divFloor(deltaY01 * (localPoints[2].x - localPoints[0].x), deltaY02),
+            .y = y1,
+        };
+
+        // paint upper
+        {
+            var sy = localPoints[0].y;
+            var ly: i32 = 0;
+            while (sy <= localPoints[1].y) {
+                var x0 = localPoints[0].x + @divFloor(ly * (localPoints[1].x - localPoints[0].x), deltaY01);
+                var x1 = localPoints[0].x + @divFloor(ly * (pHelp.x - localPoints[0].x), deltaY01);
+
+                var x = std.math.min(x0, x1);
+                while (x <= std.math.max(x0, x1)) : (x += 1) {
+                    paintPixel(x, sy, fillColor);
+                }
+
+                sy += 1;
+                ly += 1;
+            }
+        }
+
+        // paint lower
+        {
+            var sy = localPoints[1].y;
+            var ly: i32 = 0;
+            while (sy <= localPoints[2].y) {
+                var x0 = localPoints[1].x - @divFloor(ly * (localPoints[1].x - localPoints[2].x), deltaY12);
+                var x1 = pHelp.x - @divFloor(ly * (pHelp.x - localPoints[2].x), deltaY12);
+
+                var x = std.math.min(x0, x1);
+                while (x <= std.math.max(x0, x1)) : (x += 1) {
+                    paintPixel(x, sy, fillColor);
+                }
+
+                sy += 1;
+                ly += 1;
+            }
+        }
+
+        // paintLine(pHelp.x, pHelp.y, localPoints[1].x, localPoints[1].y, 13);
+    }
+
     if (borderColor) |bc| {
-        paintLine(points[0].x, points[0].y, points[1].x, points[1].y, bc);
-        paintLine(points[1].x, points[1].y, points[2].x, points[2].y, bc);
-        paintLine(points[2].x, points[2].y, points[0].x, points[0].y, bc);
+        paintLine(localPoints[0].x, localPoints[0].y, localPoints[1].x, localPoints[1].y, bc);
+        paintLine(localPoints[1].x, localPoints[1].y, localPoints[2].x, localPoints[2].y, bc);
+        paintLine(localPoints[2].x, localPoints[2].y, localPoints[0].x, localPoints[0].y, bc);
     }
 }
 
@@ -108,10 +234,22 @@ pub fn gameMain() !void {
 
         const angle = 0.0007 * @intToFloat(f32, SDL.getTicks());
 
-        const center_x = 160 + 160 * std.math.sin(0.1 * angle);
-        const center_y = 120 + 120 * std.math.sin(0.03 * angle);
+        const center_x = 160 + 160 * std.math.sin(2.1 * angle);
+        const center_y = 120 + 120 * std.math.sin(1.03 * angle);
 
         var corners: [3]Point = undefined;
+
+        // downfacing triangle ( v-form )
+        // corners[0] = .{ .x = 160 - 40, .y = 100 };
+        // corners[1] = .{ .x = 160 + 40, .y = 100 };
+        // corners[2] = .{ .x = 160, .y = 140 };
+
+        // upfacing triangle ( ^-form )
+        // corners[0] = .{ .x = 160 - 40, .y = 140 };
+        // corners[1] = .{ .x = 160 + 40, .y = 140 };
+        // corners[2] = .{ .x = 160, .y = 100 };
+
+        // rotating triangle
         for (corners) |*corner, i| {
             const deg120 = 3.0 * std.math.pi / 2.0;
             const a = angle + deg120 * @intToFloat(f32, i);
@@ -119,9 +257,15 @@ pub fn gameMain() !void {
             corner.y = @floatToInt(i32, @round(center_y + 48 * std.math.cos(a)));
         }
 
+        for (screen) |*row| {
+            for (row) |*pix| {
+                pix.* = 0;
+            }
+        }
+
         paintTriangle(
             corners,
-            1,
+            9,
             15,
         );
 
