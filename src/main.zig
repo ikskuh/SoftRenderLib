@@ -1,7 +1,11 @@
 const std = @import("std");
 const SDL = @import("sdl2");
 
-var screen: [240][320]u8 = undefined;
+const screen = struct {
+    const width = 320;
+    const height = 240;
+    var pixels: [height][width]u8 = undefined;
+};
 var palette: [256]u32 = undefined;
 
 // pre-optimization
@@ -14,10 +18,19 @@ var palette: [256]u32 = undefined;
 // avg time:   70.050µs
 // worst time: 305.346µs
 
+// post-optimization 2
+// best time:  8.242µs
+// avg time:   46.342µs
+// worst time: 170.343µs
+
 fn paintPixel(x: i32, y: i32, color: u8) void {
-    if (x >= 0 and y >= 0 and x < 320 and y < 240) {
-        screen[@intCast(usize, y)][@intCast(usize, x)] = color;
+    if (x >= 0 and y >= 0 and x < screen.width and y < screen.height) {
+        paintPixelUnsafe(x, y, color);
     }
+}
+
+fn paintPixelUnsafe(x: i32, y: i32, color: u8) void {
+    screen.pixels[@intCast(usize, y)][@intCast(usize, x)] = color;
 }
 
 fn paintLine(x0: i32, y0: i32, x1: i32, y1: i32, color: u8) void {
@@ -66,15 +79,21 @@ fn paintTriangle(points: [3]Point, fillColor: u8, borderColor: ?u8) void {
     // Implements two special versions
     // of painting an up-facing or down-facing triangle with one perfectly horizontal side.
     const Helper = struct {
-        fn paintUpperTriangle(x00: i32, x01: i32, x1: i32, y0: i32, y1: i32, color: u8) void {
+        const Mode = enum {
+            growing,
+            shrinking,
+        };
+        fn paintHalfTriangle(comptime mode: Mode, x_left: i32, x_right: i32, x_low: i32, y0: i32, y1: i32, color: u8) void {
+            if (y0 >= screen.height or y1 < 0)
+                return;
             const totalY = y1 - y0;
             std.debug.assert(totalY > 0);
 
-            var xa = std.math.min(x00, x01);
-            var xb = std.math.max(x00, x01);
+            var xa = if (mode == .shrinking) std.math.min(x_left, x_right) else x_low;
+            var xb = if (mode == .shrinking) std.math.max(x_left, x_right) else x_low;
 
-            const dx_a = x1 - xa;
-            const dx_b = x1 - xb;
+            const dx_a = if (mode == .shrinking) x_low - xa else std.math.min(x_left, x_right) - x_low;
+            const dx_b = if (mode == .shrinking) x_low - xb else std.math.max(x_left, x_right) - x_low;
 
             const sx_a = if (dx_a < 0) @as(i32, -1) else 1;
             const sx_b = if (dx_b < 0) @as(i32, -1) else 1;
@@ -86,10 +105,13 @@ fn paintTriangle(points: [3]Point, fillColor: u8, borderColor: ?u8) void {
             var e_b: f32 = 0;
 
             var sy = y0;
-            while (sy <= y1) : (sy += 1) {
-                var x = xa;
-                while (x <= xb) : (x += 1) {
-                    paintPixel(x, sy, color);
+            while (sy <= std.math.min(screen.height - 1, y1)) : (sy += 1) {
+                if (sy >= 0) {
+                    var x_s = std.math.max(xa, 0);
+                    const x_e = std.math.min(xb, screen.width - 1);
+                    while (x_s <= x_e) : (x_s += 1) {
+                        paintPixelUnsafe(x_s, sy, color);
+                    }
                 }
 
                 e_a += de_a;
@@ -108,47 +130,12 @@ fn paintTriangle(points: [3]Point, fillColor: u8, borderColor: ?u8) void {
                 }
             }
         }
+
+        fn paintUpperTriangle(x00: i32, x01: i32, x1: i32, y0: i32, y1: i32, color: u8) void {
+            paintHalfTriangle(.shrinking, x00, x01, x1, y0, y1, color);
+        }
         fn paintLowerTriangle(x0: i32, x10: i32, x11: i32, y0: i32, y1: i32, color: u8) void {
-            const totalY = y1 - y0;
-            std.debug.assert(totalY > 0);
-
-            var xa = x0;
-            var xb = x0;
-
-            const dx_a = std.math.min(x10, x11) - xa;
-            const dx_b = std.math.max(x10, x11) - xb;
-
-            const sx_a = if (dx_a < 0) @as(i32, -1) else 1;
-            const sx_b = if (dx_b < 0) @as(i32, -1) else 1;
-
-            const de_a = std.math.fabs(@intToFloat(f32, dx_a) / @intToFloat(f32, totalY));
-            const de_b = std.math.fabs(@intToFloat(f32, dx_b) / @intToFloat(f32, totalY));
-
-            var e_a: f32 = 0;
-            var e_b: f32 = 0;
-
-            var sy = y0;
-            while (sy <= y1) : (sy += 1) {
-                var x = xa;
-                while (x <= xb) : (x += 1) {
-                    paintPixel(x, sy, color);
-                }
-
-                e_a += de_a;
-                e_b += de_b;
-
-                if (e_a >= 0.5) {
-                    const d = @floor(e_a);
-                    xa += @floatToInt(i32, d) * sx_a;
-                    e_a -= d;
-                }
-
-                if (e_b >= 0.5) {
-                    const d = @floor(e_b);
-                    xb += @floatToInt(i32, d) * sx_b;
-                    e_b -= d;
-                }
-            }
+            paintHalfTriangle(.growing, x10, x11, x0, y0, y1, color);
         }
     };
 
@@ -256,7 +243,7 @@ pub fn gameMain() !void {
     var renderer = try SDL.createRenderer(window, null, .{ .accelerated = true, .presentVSync = true });
     defer renderer.destroy();
 
-    var texture = try SDL.createTexture(renderer, .rgbx8888, .streaming, 320, 240);
+    var texture = try SDL.createTexture(renderer, .rgbx8888, .streaming, screen.width, screen.height);
     defer texture.destroy();
 
     var prng = std.rand.DefaultPrng.init(0);
@@ -283,6 +270,9 @@ pub fn gameMain() !void {
     var worstTime: f64 = 0;
     var totalTime: f64 = 0;
     var totalFrames: f64 = 0;
+
+    var perfStats: [256]f64 = [_]f64{0} ** 256;
+    var perfPtr: u8 = 0;
 
     mainLoop: while (true) {
         while (SDL.pollEvent()) |ev| {
@@ -326,7 +316,7 @@ pub fn gameMain() !void {
             corner.y = @floatToInt(i32, @round(center_y + 48 * std.math.cos(a)));
         }
 
-        for (screen) |*row| {
+        for (screen.pixels) |*row| {
             for (row) |*pix| {
                 pix.* = 0;
             }
@@ -337,7 +327,7 @@ pub fn gameMain() !void {
         paintTriangle(
             corners,
             9,
-            15,
+            null,
         );
 
         {
@@ -348,17 +338,20 @@ pub fn gameMain() !void {
             bestTime = std.math.min(bestTime, time);
             worstTime = std.math.max(worstTime, time);
             std.debug.warn("triangle time: {d: >10.3}µs\n", .{time});
+
+            perfStats[perfPtr] = time;
+            perfPtr +%= 1;
         }
 
         // Update the screen buffer
         {
-            var rgbaScreen: [240][320]u32 = undefined;
+            var rgbaScreen: [screen.height][screen.width]u32 = undefined;
             for (rgbaScreen) |*row, y| {
                 for (row) |*pix, x| {
-                    pix.* = palette[screen[y][x]];
+                    pix.* = palette[screen.pixels[y][x]];
                 }
             }
-            try texture.update(@sliceToBytes(rgbaScreen[0..]), 320 * 4, null);
+            try texture.update(@sliceToBytes(rgbaScreen[0..]), screen.width * 4, null);
         }
 
         try renderer.setColorRGB(0, 0, 0);
@@ -373,6 +366,26 @@ pub fn gameMain() !void {
         //     .width = 100,
         //     .height = 50,
         // });
+
+        try renderer.setColor(SDL.Color.parse("#FF8000") catch unreachable);
+        {
+            var i: u8 = 0;
+            while (i < 255) : (i += 1) {
+                var t0 = perfStats[perfPtr +% i +% 0];
+                var t1 = perfStats[perfPtr +% i +% 1];
+
+                var y0 = 256 - @floatToInt(i32, @round(256 * t0 / 100));
+                var y1 = 256 - @floatToInt(i32, @round(256 * t1 / 100));
+
+                try renderer.drawLine(i + 0, y0, i + 1, y1);
+            }
+        }
+        try renderer.setColor(SDL.Color.parse("#FFFFFF") catch unreachable);
+        {
+            var y = 256 - @floatToInt(i32, @round(256 * (totalTime / totalFrames) / 100));
+
+            try renderer.drawLine(0, y, 256, y);
+        }
 
         renderer.present();
     }
