@@ -4,6 +4,16 @@ const SDL = @import("sdl2");
 var screen: [240][320]u8 = undefined;
 var palette: [256]u32 = undefined;
 
+// pre-optimization
+// best time:  28.146µs
+// avg time:   86.754µs
+// worst time: 3445.271µs
+
+// post-optimization
+// best time:  22.489µs
+// avg time:   70.050µs
+// worst time: 305.346µs
+
 fn paintPixel(x: i32, y: i32, color: u8) void {
     if (x >= 0 and y >= 0 and x < 320 and y < 240) {
         screen[@intCast(usize, y)][@intCast(usize, x)] = color;
@@ -53,120 +63,169 @@ fn paintTriangle(points: [3]Point, fillColor: u8, borderColor: ?u8) void {
         }.lessThan,
     );
 
+    // Implements two special versions
+    // of painting an up-facing or down-facing triangle with one perfectly horizontal side.
     const Helper = struct {
         fn paintUpperTriangle(x00: i32, x01: i32, x1: i32, y0: i32, y1: i32, color: u8) void {
             const totalY = y1 - y0;
             std.debug.assert(totalY > 0);
 
-            var sy = y0;
-            var ly: i32 = 0;
-            while (sy <= y1) {
-                const xa = x00 + @divFloor(ly * (x1 - x00), totalY);
-                const xb = x01 + @divFloor(ly * (x1 - x01), totalY);
+            var xa = std.math.min(x00, x01);
+            var xb = std.math.max(x00, x01);
 
-                var x = std.math.min(xa, xb);
-                while (x <= std.math.max(xa, xb)) : (x += 1) {
+            const dx_a = x1 - xa;
+            const dx_b = x1 - xb;
+
+            const sx_a = if (dx_a < 0) @as(i32, -1) else 1;
+            const sx_b = if (dx_b < 0) @as(i32, -1) else 1;
+
+            const de_a = std.math.fabs(@intToFloat(f32, dx_a) / @intToFloat(f32, totalY));
+            const de_b = std.math.fabs(@intToFloat(f32, dx_b) / @intToFloat(f32, totalY));
+
+            var e_a: f32 = 0;
+            var e_b: f32 = 0;
+
+            var sy = y0;
+            while (sy <= y1) : (sy += 1) {
+                var x = xa;
+                while (x <= xb) : (x += 1) {
                     paintPixel(x, sy, color);
                 }
 
-                sy += 1;
-                ly += 1;
+                e_a += de_a;
+                e_b += de_b;
+
+                if (e_a >= 0.5) {
+                    const d = @floor(e_a);
+                    xa += @floatToInt(i32, d) * sx_a;
+                    e_a -= d;
+                }
+
+                if (e_b >= 0.5) {
+                    const d = @floor(e_b);
+                    xb += @floatToInt(i32, d) * sx_b;
+                    e_b -= d;
+                }
             }
         }
         fn paintLowerTriangle(x0: i32, x10: i32, x11: i32, y0: i32, y1: i32, color: u8) void {
             const totalY = y1 - y0;
             std.debug.assert(totalY > 0);
 
-            var sy = y0;
-            var ly: i32 = 0;
-            while (sy <= y1) {
-                var xa = x0 + @divFloor(ly * (x10 - x0), totalY);
-                var xb = x0 + @divFloor(ly * (x11 - x0), totalY);
+            var xa = x0;
+            var xb = x0;
 
-                var x = std.math.min(xa, xb);
-                while (x <= std.math.max(xa, xb)) : (x += 1) {
+            const dx_a = std.math.min(x10, x11) - xa;
+            const dx_b = std.math.max(x10, x11) - xb;
+
+            const sx_a = if (dx_a < 0) @as(i32, -1) else 1;
+            const sx_b = if (dx_b < 0) @as(i32, -1) else 1;
+
+            const de_a = std.math.fabs(@intToFloat(f32, dx_a) / @intToFloat(f32, totalY));
+            const de_b = std.math.fabs(@intToFloat(f32, dx_b) / @intToFloat(f32, totalY));
+
+            var e_a: f32 = 0;
+            var e_b: f32 = 0;
+
+            var sy = y0;
+            while (sy <= y1) : (sy += 1) {
+                var x = xa;
+                while (x <= xb) : (x += 1) {
                     paintPixel(x, sy, color);
                 }
 
-                sy += 1;
-                ly += 1;
+                e_a += de_a;
+                e_b += de_b;
+
+                if (e_a >= 0.5) {
+                    const d = @floor(e_a);
+                    xa += @floatToInt(i32, d) * sx_a;
+                    e_a -= d;
+                }
+
+                if (e_b >= 0.5) {
+                    const d = @floor(e_b);
+                    xb += @floatToInt(i32, d) * sx_b;
+                    e_b -= d;
+                }
             }
         }
     };
 
-    if (localPoints[0].y == localPoints[1].y and localPoints[0].y == localPoints[2].y) {
-        // this is actually a flat line m(
-        unreachable; // TODO: Fix this later some day
-        // return;
-    }
+    filler: {
+        if (localPoints[0].y == localPoints[1].y and localPoints[0].y == localPoints[2].y) {
+            // this is actually a flat line, nothing to draw here
+            break :filler;
+        }
 
-    if (localPoints[0].y == localPoints[1].y) {
-        // triangle shape:
-        // o---o
-        //  \ /
-        //   o
-        Helper.paintUpperTriangle(
-            localPoints[0].x,
-            localPoints[1].x,
-            localPoints[2].x,
-            localPoints[0].y,
-            localPoints[2].y,
-            fillColor,
-        );
-    } else if (localPoints[1].y == localPoints[2].y) {
-        // triangle shape:
-        //   o
-        //  / \
-        // o---o
-        Helper.paintLowerTriangle(
-            localPoints[0].x,
-            localPoints[1].x,
-            localPoints[2].x,
-            localPoints[0].y,
-            localPoints[1].y,
-            fillColor,
-        );
-    } else {
-        // non-straightline triangle
-        //    o
-        //   / \
-        //  o---\
-        //   \  |
-        //    \ \
-        //     \|
-        //      o
-        const y0 = localPoints[0].y;
-        const y1 = localPoints[1].y;
-        const y2 = localPoints[2].y;
+        if (localPoints[0].y == localPoints[1].y) {
+            // triangle shape:
+            // o---o
+            //  \ /
+            //   o
+            Helper.paintUpperTriangle(
+                localPoints[0].x,
+                localPoints[1].x,
+                localPoints[2].x,
+                localPoints[0].y,
+                localPoints[2].y,
+                fillColor,
+            );
+        } else if (localPoints[1].y == localPoints[2].y) {
+            // triangle shape:
+            //   o
+            //  / \
+            // o---o
+            Helper.paintLowerTriangle(
+                localPoints[0].x,
+                localPoints[1].x,
+                localPoints[2].x,
+                localPoints[0].y,
+                localPoints[1].y,
+                fillColor,
+            );
+        } else {
+            // non-straightline triangle
+            //    o
+            //   / \
+            //  o---\
+            //   \  |
+            //    \ \
+            //     \|
+            //      o
+            const y0 = localPoints[0].y;
+            const y1 = localPoints[1].y;
+            const y2 = localPoints[2].y;
 
-        const deltaY01 = y1 - y0;
-        const deltaY12 = y2 - y1;
-        const deltaY02 = y2 - y0;
-        std.debug.assert(deltaY01 > 0);
-        std.debug.assert(deltaY12 > 0);
+            const deltaY01 = y1 - y0;
+            const deltaY12 = y2 - y1;
+            const deltaY02 = y2 - y0;
+            std.debug.assert(deltaY01 > 0);
+            std.debug.assert(deltaY12 > 0);
 
-        const pHelp: Point = .{
-            .x = localPoints[0].x + @divFloor(deltaY01 * (localPoints[2].x - localPoints[0].x), deltaY02),
-            .y = y1,
-        };
+            const pHelp: Point = .{
+                .x = localPoints[0].x + @divFloor(deltaY01 * (localPoints[2].x - localPoints[0].x), deltaY02),
+                .y = y1,
+            };
 
-        Helper.paintLowerTriangle(
-            localPoints[0].x,
-            localPoints[1].x,
-            pHelp.x,
-            localPoints[0].y,
-            localPoints[1].y,
-            fillColor,
-        );
+            Helper.paintLowerTriangle(
+                localPoints[0].x,
+                localPoints[1].x,
+                pHelp.x,
+                localPoints[0].y,
+                localPoints[1].y,
+                fillColor,
+            );
 
-        Helper.paintUpperTriangle(
-            localPoints[1].x,
-            pHelp.x,
-            localPoints[2].x,
-            localPoints[1].y,
-            localPoints[2].y,
-            fillColor,
-        );
+            Helper.paintUpperTriangle(
+                localPoints[1].x,
+                pHelp.x,
+                localPoints[2].x,
+                localPoints[1].y,
+                localPoints[2].y,
+                fillColor,
+            );
+        }
     }
 
     if (borderColor) |bc| {
@@ -222,6 +281,8 @@ pub fn gameMain() !void {
 
     var bestTime: f64 = 10000;
     var worstTime: f64 = 0;
+    var totalTime: f64 = 0;
+    var totalFrames: f64 = 0;
 
     mainLoop: while (true) {
         while (SDL.pollEvent()) |ev| {
@@ -282,6 +343,8 @@ pub fn gameMain() !void {
         {
             var time = @intToFloat(f64, timer.read()) / 1000.0;
 
+            totalTime += time;
+            totalFrames += 1;
             bestTime = std.math.min(bestTime, time);
             worstTime = std.math.max(worstTime, time);
             std.debug.warn("triangle time: {d: >10.3}µs\n", .{time});
@@ -314,6 +377,7 @@ pub fn gameMain() !void {
         renderer.present();
     }
     std.debug.warn("best time:  {d: >10.3}µs\n", .{bestTime});
+    std.debug.warn("avg time:   {d: >10.3}µs\n", .{totalTime / totalFrames});
     std.debug.warn("worst time: {d: >10.3}µs\n", .{worstTime});
 }
 
