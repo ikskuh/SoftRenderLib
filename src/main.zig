@@ -1,10 +1,22 @@
 const std = @import("std");
 const SDL = @import("sdl2");
+const zgl = @import("zgl");
+
+const Quality = enum {
+    fast,
+    beautiful,
+};
+
+const quality: Quality = .fast;
+
+const DepthType = u32;
 
 const screen = struct {
-    const width = 320;
-    const height = 240;
+    const scaler = 1;
+    const width = 1280;
+    const height = 720;
     var pixels: [height][width]u8 = undefined;
+    var depth: [height][width]DepthType = undefined;
 };
 var palette: [256]u32 = undefined;
 
@@ -14,8 +26,8 @@ const Texture = struct {
     height: usize,
 
     fn sample(tex: Texture, u: f32, v: f32) u8 {
-        const x = @floatToInt(usize, @round(@intToFloat(f32, tex.width - 1) * @rem(u, 1.0)));
-        const y = @floatToInt(usize, @round(@intToFloat(f32, tex.height - 1) * @rem(v, 1.0)));
+        const x = @rem(@floatToInt(usize, @floor(@intToFloat(f32, tex.width) * u)), tex.width);
+        const y = @rem(@floatToInt(usize, @floor(@intToFloat(f32, tex.height) * v)), tex.height);
         return tex.pixels[x + tex.width * y];
     }
 };
@@ -27,8 +39,8 @@ var exampleTex = Texture{
         15, 15, 15, 15, 15, 15, 15, 15,
         15, 8,  6,  8,  6,  8,  6,  15,
         15, 6,  8,  6,  8,  6,  8,  15,
-        15, 8,  6,  8,  6,  8,  6,  15,
-        15, 6,  8,  6,  8,  6,  8,  15,
+        15, 8,  6,  11, 11, 8,  6,  15,
+        15, 6,  8,  11, 11, 6,  8,  15,
         15, 8,  6,  8,  6,  8,  6,  15,
         15, 6,  8,  6,  8,  6,  8,  15,
         15, 15, 15, 15, 15, 15, 15, 15,
@@ -218,6 +230,7 @@ fn paintTriangle(points: [3]Point, context: var, painter: fn (x: i32, y: i32, ct
         std.debug.assert(deltaY01 > 0);
         std.debug.assert(deltaY12 > 0);
 
+        // std.debug.warn("{d} * ({d} - {d}) / {d}\n", .{ deltaY01, localPoints[2].x, localPoints[0].x, deltaY02 });
         const pHelp: Point = .{
             .x = localPoints[0].x + @divFloor(deltaY01 * (localPoints[2].x - localPoints[0].x), deltaY02),
             .y = y1,
@@ -245,6 +258,89 @@ fn paintTriangle(points: [3]Point, context: var, painter: fn (x: i32, y: i32, ct
     }
 }
 
+const Vertex = struct {
+    x: i32,
+    y: i32,
+    z: f32 = 0,
+    u: f32 = 0,
+    v: f32 = 0,
+    color: u8 = 0,
+};
+
+fn makePolygon(points: var) [3]Point {
+    return [3]Point{
+        .{ .x = points[0].x, .y = points[0].y },
+        .{ .x = points[1].x, .y = points[1].y },
+        .{ .x = points[2].x, .y = points[2].y },
+    };
+}
+
+const TexturedPainter = struct {
+    fn clamp(v: f32, min: f32, max: f32) f32 {
+        return std.math.min(max, std.math.max(min, v));
+    }
+
+    fn paint(x: i32, y: i32, p: [3]Vertex) void {
+        const p1 = &p[0];
+        const p2 = &p[1];
+        const p3 = &p[2];
+
+        // std.debug.warn("{} {}\n", .{ (p2.y - p3.y), (p1.x - p3.x) });
+        const divisor = (p2.y - p3.y) * (p1.x - p3.x) + (p3.x - p2.x) * (p1.y - p3.y);
+        if (divisor == 0)
+            return;
+
+        var v1 = clamp(@intToFloat(f32, (p2.y - p3.y) * (x - p3.x) + (p3.x - p2.x) * (y - p3.y)) / @intToFloat(f32, divisor), 0.0, 1.0);
+
+        var v2 = clamp(@intToFloat(f32, (p3.y - p1.y) * (x - p3.x) + (p1.x - p3.x) * (y - p3.y)) / @intToFloat(f32, divisor), 0.0, 1.0);
+
+        var v3 = clamp(1.0 - v2 - v1, 0.0, 1.0);
+
+        if (quality != .fast) {
+            var sum = v1 + v2 + v3;
+            v1 /= sum;
+            v2 /= sum;
+            v3 /= sum;
+        }
+
+        const z = p1.z * v1 + p2.z * v2 + p3.z * v3;
+        if (z < 0.0 or z > 1.0)
+            return;
+
+        const int_z = @floatToInt(DepthType, @floor(@floatToInt(f32, std.math.maxInt(DepthType) - 1) * z));
+
+        const depth = &screen.depth[@intCast(usize, y)][@intCast(usize, x)];
+
+        if (@atomicLoad(DepthType, depth, .Acquire) < int_z)
+            return;
+
+        const pixCol = exampleTex.sample(
+            p1.u * v1 + p2.u * v2 + p3.u * v3,
+            p1.v * v1 + p2.v * v2 + p3.v * v3,
+        );
+        if (pixCol == 0x00)
+            return;
+
+        _ = @atomicRmw(DepthType, depth, .Min, int_z, .SeqCst); // we don't care for the previous value
+        if (@atomicLoad(DepthType, depth, .Acquire) != int_z)
+            return;
+
+        // if (depth.* < int_z)
+        //     return;
+        // depth.* = int_z;
+
+        paintPixelUnsafe(x, y, pixCol);
+    }
+};
+
+fn angleToVec3(pan: f32, tilt: f32) zgl.math3d.Vec3 {
+    return .{
+        .x = std.math.sin(pan) * std.math.cos(tilt),
+        .y = std.math.sin(tilt),
+        .z = -std.math.cos(pan) * std.math.cos(tilt),
+    };
+}
+
 pub fn gameMain() !void {
     try SDL.init(.{
         .video = true,
@@ -257,8 +353,8 @@ pub fn gameMain() !void {
         "SoftRender: Triangle",
         .{ .centered = {} },
         .{ .centered = {} },
-        3 * screen.width,
-        3 * screen.height,
+        screen.scaler * screen.width,
+        screen.scaler * screen.height,
         .{ .shown = true },
     );
     defer window.destroy();
@@ -287,25 +383,43 @@ pub fn gameMain() !void {
     palette[14] = 0xdad45eFF; // piss
     palette[15] = 0xdeeed6FF; // white
 
-    // for (palette) |*pal, i| {
-    //     const v = @intCast(u8, i);
-    //     // render 232 colors here
+    {
+        var file = try std.fs.cwd().openRead("assets/lost_empire.pcx");
+        defer file.close();
 
-    //     const C = packed struct {
-    //         r: u3,
-    //         g: u3,
-    //         b: u2,
-    //     };
-    //     std.debug.assert(@sizeOf(C) == 1);
+        var img = try zgl.pcx.load(std.heap.c_allocator, &file);
+        errdefer img.deinit();
 
-    //     const c = @bitCast(C, v);
+        if (img == .bpp8) {
+            exampleTex.width = img.bpp8.width;
+            exampleTex.height = img.bpp8.height;
+            exampleTex.pixels = img.bpp8.pixels;
+            if (img.bpp8.palette) |pal| {
+                for (palette) |*col, i| {
+                    const RGBA = packed struct {
+                        x: u8 = 0,
+                        b: u8,
+                        g: u8,
+                        r: u8,
+                    };
+                    var c: RGBA = .{
+                        .r = pal[i].r,
+                        .g = pal[i].g,
+                        .b = pal[i].b,
+                    };
 
-    //     const r = (@as(u32, c.r) << 5) | (@as(u32, c.r) << 2) | (@as(u32, c.r) >> 1);
-    //     const g = (@as(u32, c.g) << 5) | (@as(u32, c.g) << 2) | (@as(u32, c.g) >> 1);
-    //     const b = (@as(u32, c.b) << 6) | (@as(u32, c.b) << 4) | (@as(u32, c.b) << 2) | @as(u32, c.b);
+                    col.* = @bitCast(u32, c);
+                }
+            }
+        } else {
+            img.deinit();
+            return error.InvalidTexture;
+        }
+    }
 
-    //     pal.* = 0xFF | (b << 8) | (g << 16) | (r << 24);
-    // }
+    var model = try zgl.wavefrontObj.load(std.heap.c_allocator, "assets/lost_empire.obj");
+
+    std.debug.warn("model size: {}\n", .{model.faces.len});
 
     var bestTime: f64 = 10000;
     var worstTime: f64 = 0;
@@ -315,7 +429,56 @@ pub fn gameMain() !void {
     var perfStats: [256]f64 = [_]f64{0} ** 256;
     var perfPtr: u8 = 0;
 
-    mainLoop: while (true) {
+    const Camera = struct {
+        pan: f32,
+        tilt: f32,
+        position: zgl.math3d.Vec3,
+    };
+
+    var camera: Camera = .{
+        .pan = 0,
+        .tilt = 0,
+        .position = .{ .x = 0, .y = 0, .z = 0 },
+    };
+
+    var plenty_of_memory = try std.heap.page_allocator.alloc(u8, model.faces.len * 1024);
+    defer std.heap.page_allocator.free(plenty_of_memory);
+
+    var queue = std.atomic.Queue([3]Vertex).init();
+
+    var polyCounter: usize = 0;
+
+    const RenderWorker = struct {
+        queue: *std.atomic.Queue([3]Vertex),
+        thread: *std.Thread,
+        shutdown: bool,
+        counter: *usize,
+    };
+
+    var workers: [8]RenderWorker = undefined;
+
+    for (workers) |*loop_worker| {
+        loop_worker.* = RenderWorker{
+            .queue = &queue,
+            .thread = undefined,
+            .shutdown = false,
+            .counter = &polyCounter,
+        };
+        loop_worker.thread = try std.Thread.spawn(loop_worker, struct {
+            fn doWork(worker: *RenderWorker) void {
+                while (!worker.shutdown) {
+                    while (worker.queue.get()) |job| {
+                        paintTriangle(makePolygon(job.data), job.data, TexturedPainter.paint);
+                        _ = @atomicRmw(usize, worker.counter, .Add, 1, .SeqCst);
+                    }
+                    std.time.sleep(1);
+                }
+            }
+        }.doWork);
+    }
+
+    var fcount: usize = 0;
+    mainLoop: while (true) : (fcount += 1) {
         while (SDL.pollEvent()) |ev| {
             switch (ev) {
                 .quit => {
@@ -332,88 +495,150 @@ pub fn gameMain() !void {
             }
         }
 
+        const kbd = SDL.getKeyboardState();
+
+        var speed = if (kbd.isPressed(.SDL_SCANCODE_LSHIFT)) @as(f32, 100.0) else @as(f32, 1);
+
+        if (kbd.isPressed(.SDL_SCANCODE_LEFT))
+            camera.pan += 0.015;
+        if (kbd.isPressed(.SDL_SCANCODE_RIGHT))
+            camera.pan -= 0.015;
+        if (kbd.isPressed(.SDL_SCANCODE_PAGEUP))
+            camera.tilt += 0.015;
+        if (kbd.isPressed(.SDL_SCANCODE_PAGEDOWN))
+            camera.tilt -= 0.015;
+
+        const camdir = angleToVec3(camera.pan, camera.tilt);
+
+        if (kbd.isPressed(.SDL_SCANCODE_UP))
+            camera.position = camera.position.add(camdir.scale(speed * 0.01));
+        if (kbd.isPressed(.SDL_SCANCODE_DOWN))
+            camera.position = camera.position.add(camdir.scale(speed * -0.01));
+
         const angle = 0.0007 * @intToFloat(f32, SDL.getTicks());
-
-        const center_x = 160 + 160 * std.math.sin(2.1 * angle);
-        const center_y = 120 + 120 * std.math.sin(1.03 * angle);
-
-        var corners: [3]Point = undefined;
-
-        // downfacing triangle ( v-form )
-        // corners[0] = .{ .x = 160 - 40, .y = 100 };
-        // corners[1] = .{ .x = 160 + 40, .y = 100 };
-        // corners[2] = .{ .x = 160, .y = 140 };
-
-        // upfacing triangle ( ^-form )
-        // corners[0] = .{ .x = 160 - 40, .y = 140 };
-        // corners[1] = .{ .x = 160 + 40, .y = 140 };
-        // corners[2] = .{ .x = 160, .y = 100 };
-
-        // rotating triangle
-        for (corners) |*corner, i| {
-            const deg120 = 3.0 * std.math.pi / 2.0;
-            const a = angle + deg120 * @intToFloat(f32, i);
-            corner.x = @floatToInt(i32, @round(center_x + 48 * std.math.sin(a)));
-            corner.y = @floatToInt(i32, @round(center_y + 48 * std.math.cos(a)));
-        }
 
         for (screen.pixels) |*row| {
             for (row) |*pix| {
                 pix.* = 0;
             }
         }
+        for (screen.depth) |*row| {
+            for (row) |*depth| {
+                @atomicStore(DepthType, depth, std.math.maxInt(DepthType), .Release);
+            }
+        }
+
+        const persp = zgl.math3d.Mat4.createPerspective(
+            60.0 * std.math.tau / 360.0,
+            4.0 / 3.0,
+            0.01,
+            10000.0,
+        );
+
+        const view = zgl.math3d.Mat4.createLookAt(camera.position, camera.position.add(camdir), zgl.math3d.Vec3.unitY);
 
         var timer = try std.time.Timer.start();
 
-        paintTriangle(corners, corners, struct {
-            fn clamp(v: f32, min: f32, max: f32) f32 {
-                return std.math.min(max, std.math.max(min, v));
+        _ = screen.pixels;
+
+        // {
+        //     var i: usize = 0;
+        //     while (i < indices.len) : (i += 3) {
+        //         var poly = [_]Vertex{
+        //             corners[indices[i + 0]],
+        //             corners[indices[i + 1]],
+        //             corners[indices[i + 2]],
+        //         };
+        //         paintTriangle(makePolygon(poly), poly, TexturedPainter.paint);
+        //     }
+        // }
+
+        var visible_polycount: usize = 0;
+        var total_polycount: usize = 0;
+
+        {
+            @atomicStore(usize, &polyCounter, 0, .Release);
+
+            var fixed_buffer_allocator = std.heap.ThreadSafeFixedBufferAllocator.init(plenty_of_memory);
+            var allocator = &fixed_buffer_allocator.allocator;
+
+            const world = zgl.math3d.Mat4.identity; // (5.0 * worldX, 0.0, 5.0 * worldZ); // createAngleAxis(.{ .x = 0, .y = 1, .z = 0 }, angle);
+
+            const mvp = world.mul(view).mul(persp);
+
+            const faces = model.faces.toSliceConst();
+            const positions = model.positions.toSliceConst();
+            const uvCoords = model.textureCoordinates.toSliceConst();
+
+            for (model.objects.toSliceConst()) |obj| {
+                var i: usize = 0;
+                face: while (i < obj.count) : (i += 1) {
+                    const face = faces[obj.start + i];
+                    if (face.count != 3)
+                        continue;
+
+                    total_polycount += 1;
+
+                    var poly: [3]Vertex = undefined;
+                    for (poly) |*vert, j| {
+                        const vtx = face.vertices[j];
+
+                        const local_pos = positions[vtx.position];
+
+                        var screen_pos = local_pos.swizzle("xyz1").transform(mvp);
+                        if (std.math.fabs(screen_pos.w) <= 1e-9)
+                            continue :face;
+
+                        var linear_screen_pos = screen_pos.swizzle("xyz").scale(1.0 / screen_pos.w);
+
+                        if (screen_pos.w < 0)
+                            continue :face;
+                        if (std.math.fabs(linear_screen_pos.x) > 3.0)
+                            continue :face;
+                        if (std.math.fabs(linear_screen_pos.y) > 3.0)
+                            continue :face;
+
+                        // std.debug.warn("{d} {d}\n", .{ linear_screen_pos.x, linear_screen_pos.y });
+
+                        vert.x = @floatToInt(i32, @floor(screen.width * (0.5 + 0.5 * linear_screen_pos.x)));
+                        vert.y = @floatToInt(i32, @floor(screen.height * (0.5 - 0.5 * linear_screen_pos.y)));
+                        vert.z = linear_screen_pos.z;
+
+                        vert.u = uvCoords[vtx.textureCoordinate.?].x;
+                        vert.v = 1.0 - uvCoords[vtx.textureCoordinate.?].y;
+                    }
+
+                    // (B - A) x (C - A)
+                    var winding = zgl.math3d.Vec3.cross(.{
+                        .x = @intToFloat(f32, poly[1].x - poly[0].x),
+                        .y = @intToFloat(f32, poly[1].y - poly[0].y),
+                        .z = 0,
+                    }, .{
+                        .x = @intToFloat(f32, poly[2].x - poly[0].x),
+                        .y = @intToFloat(f32, poly[2].y - poly[0].y),
+                        .z = 0,
+                    });
+                    if (winding.z < 0)
+                        continue;
+
+                    visible_polycount += 1;
+
+                    const node = allocator.create(std.atomic.Queue([3]Vertex).Node) catch unreachable;
+                    node.* = std.atomic.Queue([3]Vertex).Node{
+                        .prev = undefined,
+                        .next = undefined,
+                        .data = poly,
+                    };
+                    queue.put(node);
+
+                    // paintTriangle(makePolygon(poly), poly, TexturedPainter.paint);
+                }
             }
 
-            fn paint(x: i32, y: i32, p: [3]Point) void {
-                const p1 = p[0];
-                const p2 = p[1];
-                const p3 = p[2];
-
-                var v1 = clamp(@intToFloat(f32, (p2.y - p3.y) * (x - p3.x) + (p3.x - p2.x) * (y - p3.y)) /
-                    @intToFloat(f32, (p2.y - p3.y) * (p1.x - p3.x) + (p3.x - p2.x) * (p1.y - p3.y)), 0.0, 1.0);
-
-                var v2 = clamp(@intToFloat(f32, (p3.y - p1.y) * (x - p3.x) + (p1.x - p3.x) * (y - p3.y)) /
-                    @intToFloat(f32, (p2.y - p3.y) * (p1.x - p3.x) + (p3.x - p2.x) * (p1.y - p3.y)), 0.0, 1.0);
-
-                var v3 = clamp(1.0 - v2 - v1, 0.0, 1.0);
-
-                var sum = v1 + v2 + v3;
-                v1 /= sum;
-                v2 /= sum;
-                v3 /= sum;
-
-                const uvs_x = [_]f32{ 0.0, 1.0, 1.0 };
-                const uvs_y = [_]f32{ 0.0, 0.0, 1.0 };
-
-                paintPixelUnsafe(x, y, exampleTex.sample(
-                    uvs_x[0] * v1 + uvs_x[1] * v2 + uvs_x[2] * v3,
-                    uvs_y[0] * v1 + uvs_y[1] * v2 + uvs_y[2] * v3,
-                ));
-
-                // if (v1 > 1 or v2 > 1 or v3 < 0)
-                //     std.debug.warn("{d} {d} {d}\n", .{ v1, v2, v3 });
-
-                // const C = packed struct {
-                //     r: u3,
-                //     g: u3,
-                //     b: u2,
-                // };
-
-                // const c = C{
-                //     .r = @floatToInt(u3, @round(7 * v1)),
-                //     .g = @floatToInt(u3, @round(7 * v2)),
-                //     .b = @floatToInt(u2, @round(3 * v3)),
-                // };
-
-                // paintPixelUnsafe(x, y, @bitCast(u8, c));
+            while (@atomicLoad(usize, &polyCounter, .Acquire) != visible_polycount) {
+                std.time.sleep(1);
             }
-        }.paint);
+        }
 
         {
             var time = @intToFloat(f64, timer.read()) / 1000.0;
@@ -422,7 +647,12 @@ pub fn gameMain() !void {
             totalFrames += 1;
             bestTime = std.math.min(bestTime, time);
             worstTime = std.math.max(worstTime, time);
-            std.debug.warn("triangle time: {d: >10.3}µs\n", .{time});
+            std.debug.warn("total time: {d: >10.3}µs\ttriangle time: {d: >10.3}µs\tpoly count: {}/{}\n", .{
+                time,
+                time / @intToFloat(f64, visible_polycount),
+                visible_polycount,
+                total_polycount,
+            });
 
             perfStats[perfPtr] = time;
             perfPtr +%= 1;
@@ -444,12 +674,29 @@ pub fn gameMain() !void {
 
         try renderer.copy(texture, null, null);
 
+        try renderer.setDrawBlendMode(.SDL_BLENDMODE_BLEND);
+
         {
             const getY = struct {
                 fn getY(v: f64) i32 {
-                    return 256 - @floatToInt(i32, @round(256 * v / 1000));
+                    return 256 - @floatToInt(i32, @round(256 * v / 17000));
                 }
             }.getY;
+
+            try renderer.setColor(SDL.Color.parse("#FFFFFF40") catch unreachable);
+            try renderer.fillRect(.{
+                .x = 0,
+                .y = 0,
+                .width = 256,
+                .height = 256,
+            });
+
+            try renderer.setColor(SDL.Color.parse("#00000080") catch unreachable);
+            var ms: f64 = 1;
+            while (ms <= 16) : (ms += 1) {
+                try renderer.drawLine(0, getY(ms * 1000), 256, getY(ms * 1000));
+            }
+            try renderer.drawLine(0, getY(0), 256, getY(0));
 
             try renderer.setColor(SDL.Color.parse("#FF8000") catch unreachable);
             {
@@ -481,11 +728,12 @@ pub fn gameMain() !void {
 /// wraps gameMain, so we can react to an SdlError and print
 /// its error message
 pub fn main() !void {
-    gameMain() catch |err| switch (err) {
-        error.SdlError => {
-            std.debug.warn("SDL Failure: {}\n", .{SDL.getError()});
-            return err;
-        },
-        else => return err,
-    };
+    // gameMain() catch |err| switch (err) {
+    //     error.SdlError => {
+    //         std.debug.warn("SDL Failure: {}\n", .{SDL.getError()});
+    //         return err;
+    //     },
+    //     else => return err,
+    // };
+    try gameMain();
 }

@@ -1,3 +1,6 @@
 [submodule "SDL.zig"]
 	path = SDL.zig
 	url = https://www.github.com/MasterQ32/SDL.zig
+[submodule "zig-gamedev-lib"]
+	path = zig-gamedev-lib
+	url = https://github.com/MasterQ32/zig-gamedev-lib

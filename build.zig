@@ -7,6 +7,7 @@ pub fn build(b: *Builder) void {
     exe.linkSystemLibrary("c");
     exe.linkSystemLibrary("sdl2");
     exe.addPackagePath("sdl2", "SDL.zig/src/lib.zig");
+    exe.addPackagePath("zgl", "zig-gamedev-lib/src/lib.zig");
     exe.install();
 
     const run_cmd = exe.run();
