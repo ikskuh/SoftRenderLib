@@ -323,18 +323,6 @@ pub fn gameMain() !void {
 
         _ = screen.pixels;
 
-        // {
-        //     var i: usize = 0;
-        //     while (i < indices.len) : (i += 3) {
-        //         var poly = [_]Vertex{
-        //             corners[indices[i + 0]],
-        //             corners[indices[i + 1]],
-        //             corners[indices[i + 2]],
-        //         };
-        //         paintTriangle(makePolygon(poly), poly, TexturedPainter.paint);
-        //     }
-        // }
-
         var visible_polycount: usize = 0;
         var total_polycount: usize = 0;
 
