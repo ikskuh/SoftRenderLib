@@ -8,9 +8,9 @@ const Quality = enum {
 };
 
 const quality: Quality = .fast;
-const multithreading: ?comptime_int = 8;
+const multithreading: ?comptime_int = null;
 
-const level_file = "assets/lost_empire";
+const level_file = "assets/terrain";
 
 const DepthType = u32;
 
@@ -728,17 +728,24 @@ const TexturedPainter = struct {
         if (z < 0.0 or z > 1.0)
             return;
 
-        const int_z = @floatToInt(DepthType, @floor(@floatToInt(f32, std.math.maxInt(DepthType) - 1) * z));
+        const int_z = @floatToInt(DepthType, @floor(@floatToInt(f32, std.math.maxInt(DepthType) - 1) * @as(f64, z)));
 
         const depth = &screen.depth[@intCast(usize, y)][@intCast(usize, x)];
 
         if (@atomicLoad(DepthType, depth, .Acquire) < int_z)
             return;
 
-        const pixCol = exampleTex.sample(
-            p1.u * v1 + p2.u * v2 + p3.u * v3,
-            p1.v * v1 + p2.v * v2 + p3.v * v3,
-        );
+        var u: f32 = undefined;
+        var v: f32 = undefined;
+        if (quality == .beautiful) {
+            u = z * ((p1.u / z) * v1 + (p2.u / z) * v2 + (p3.u / z) * v3);
+            v = z * ((p1.v / z) * v1 + (p2.v / z) * v2 + (p3.v / z) * v3);
+        } else {
+            u = p1.u * v1 + p2.u * v2 + p3.u * v3;
+            v = p1.v * v1 + p2.v * v2 + p3.v * v3;
+        }
+
+        const pixCol = exampleTex.sample(u, v);
         if (pixCol == 0x00)
             return;
 
