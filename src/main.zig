@@ -8,34 +8,38 @@ const Quality = enum {
 };
 
 const quality: Quality = .fast;
-const multithreading: ?comptime_int = null;
+const multithreading: ?comptime_int = 8;
 
-const level_file = "assets/terrain";
+const level_file = "assets/lost_empire";
 
 const DepthType = u32;
 
+const PixelType = u8;
+
 const screen = struct {
     const scaler = 1;
-    const width = 1280;
-    const height = 720;
-    var pixels: [height][width]u8 = undefined;
+    const width = 800;
+    const height = 480;
+    var pixels: [height][width]PixelType = undefined;
     var depth: [height][width]DepthType = undefined;
 };
 var palette: [256]u32 = undefined;
 
-const Texture = struct {
-    pixels: []const u8,
-    width: usize,
-    height: usize,
+fn Texture(comptime Pixel: type) type {
+    return struct {
+        pixels: []const PixelType,
+        width: usize,
+        height: usize,
 
-    fn sample(tex: Texture, u: f32, v: f32) u8 {
-        const x = @rem(@floatToInt(usize, @floor(@intToFloat(f32, tex.width) * u)), tex.width);
-        const y = @rem(@floatToInt(usize, @floor(@intToFloat(f32, tex.height) * v)), tex.height);
-        return tex.pixels[x + tex.width * y];
-    }
-};
+        fn sample(tex: @This(), u: f32, v: f32) PixelType {
+            const x = @rem(@floatToInt(usize, @floor(@intToFloat(f32, tex.width) * u)), tex.width);
+            const y = @rem(@floatToInt(usize, @floor(@intToFloat(f32, tex.height) * v)), tex.height);
+            return tex.pixels[x + tex.width * y];
+        }
+    };
+}
 
-var exampleTex = Texture{
+var exampleTex = Texture(PixelType){
     .width = 8,
     .height = 8,
     .pixels = &[_]u8{
@@ -65,12 +69,34 @@ var exampleTex = Texture{
 // avg time:   46.342µs
 // worst time: 170.343µs
 
+const Vertex = struct {
+    x: i32,
+    y: i32,
+    z: f32 = 0,
+    u: f32 = 0,
+    v: f32 = 0,
+    color: u8 = 0,
+};
+
+const Face = struct {
+    texture: *Texture(PixelType),
+    vertices: [3]Vertex,
+
+    pub fn toPolygon(face: Face) [3]Point {
+        return [3]Point{
+            .{ .x = face.vertices[0].x, .y = face.vertices[0].y },
+            .{ .x = face.vertices[1].x, .y = face.vertices[1].y },
+            .{ .x = face.vertices[2].x, .y = face.vertices[2].y },
+        };
+    }
+};
+
 const RenderSystem = if (multithreading) |core_count|
     struct {
-        const Queue = std.atomic.Queue([3]Vertex);
+        const Queue = std.atomic.Queue(Face);
 
         const RenderWorker = struct {
-            queue: *std.atomic.Queue([3]Vertex),
+            queue: *Queue,
             thread: *std.Thread,
             shutdown: bool,
         };
@@ -101,7 +127,7 @@ const RenderSystem = if (multithreading) |core_count|
                     fn doWork(worker: *RenderWorker) void {
                         while (!worker.shutdown) {
                             while (worker.queue.get()) |job| {
-                                paintTriangle(makePolygon(job.data), job.data, TexturedPainter.paint);
+                                paintTriangle(job.data.toPolygon(), job.data, TexturedPainter.paint);
                                 _ = @atomicRmw(usize, &processedPolyCount, .Add, 1, .SeqCst);
                             }
                             std.time.sleep(1);
@@ -117,12 +143,12 @@ const RenderSystem = if (multithreading) |core_count|
             @atomicStore(usize, &fixed_buffer_allocator.end_index, 0, .Release);
         }
 
-        fn renderPolygon(poly: [3]Vertex) void {
-            const node = allocator.create(std.atomic.Queue([3]Vertex).Node) catch unreachable;
-            node.* = std.atomic.Queue([3]Vertex).Node{
+        fn renderPolygon(face: Face) void {
+            const node = allocator.create(Queue.Node) catch unreachable;
+            node.* = Queue.Node{
                 .prev = undefined,
                 .next = undefined,
-                .data = poly,
+                .data = face,
             };
             queue.put(node);
 
@@ -147,8 +173,8 @@ else
 
         fn beginFrame() void {}
 
-        fn renderPolygon(poly: [3]Vertex) void {
-            paintTriangle(makePolygon(poly), poly, TexturedPainter.paint);
+        fn renderPolygon(face: Face) void {
+            paintTriangle(face.toPolygon(), face, TexturedPainter.paint);
         }
 
         fn endFrame() void {}
@@ -341,15 +367,18 @@ pub fn gameMain() !void {
             for (model.objects.toSliceConst()) |obj| {
                 var i: usize = 0;
                 face: while (i < obj.count) : (i += 1) {
-                    const face = faces[obj.start + i];
-                    if (face.count != 3)
+                    const src_face = faces[obj.start + i];
+                    if (src_face.count != 3)
                         continue;
 
                     total_polycount += 1;
 
-                    var poly: [3]Vertex = undefined;
-                    for (poly) |*vert, j| {
-                        const vtx = face.vertices[j];
+                    var face = Face{
+                        .vertices = undefined,
+                        .texture = &exampleTex,
+                    };
+                    for (face.vertices) |*vert, j| {
+                        const vtx = src_face.vertices[j];
 
                         const local_pos = positions[vtx.position];
 
@@ -378,12 +407,12 @@ pub fn gameMain() !void {
 
                     // (B - A) x (C - A)
                     var winding = zgl.math3d.Vec3.cross(.{
-                        .x = @intToFloat(f32, poly[1].x - poly[0].x),
-                        .y = @intToFloat(f32, poly[1].y - poly[0].y),
+                        .x = @intToFloat(f32, face.vertices[1].x - face.vertices[0].x),
+                        .y = @intToFloat(f32, face.vertices[1].y - face.vertices[0].y),
                         .z = 0,
                     }, .{
-                        .x = @intToFloat(f32, poly[2].x - poly[0].x),
-                        .y = @intToFloat(f32, poly[2].y - poly[0].y),
+                        .x = @intToFloat(f32, face.vertices[2].x - face.vertices[0].x),
+                        .y = @intToFloat(f32, face.vertices[2].y - face.vertices[0].y),
                         .z = 0,
                     });
                     if (winding.z < 0)
@@ -391,7 +420,7 @@ pub fn gameMain() !void {
 
                     visible_polycount += 1;
 
-                    RenderSystem.renderPolygon(poly);
+                    RenderSystem.renderPolygon(face);
 
                     // paintTriangle(makePolygon(poly), poly, TexturedPainter.paint);
                 }
@@ -679,32 +708,15 @@ fn paintTriangle(points: [3]Point, context: var, painter: fn (x: i32, y: i32, ct
     }
 }
 
-const Vertex = struct {
-    x: i32,
-    y: i32,
-    z: f32 = 0,
-    u: f32 = 0,
-    v: f32 = 0,
-    color: u8 = 0,
-};
-
-fn makePolygon(points: var) [3]Point {
-    return [3]Point{
-        .{ .x = points[0].x, .y = points[0].y },
-        .{ .x = points[1].x, .y = points[1].y },
-        .{ .x = points[2].x, .y = points[2].y },
-    };
-}
-
 const TexturedPainter = struct {
     fn clamp(v: f32, min: f32, max: f32) f32 {
         return std.math.min(max, std.math.max(min, v));
     }
 
-    fn paint(x: i32, y: i32, p: [3]Vertex) void {
-        const p1 = &p[0];
-        const p2 = &p[1];
-        const p3 = &p[2];
+    fn paint(x: i32, y: i32, face: Face) void {
+        const p1 = &face.vertices[0];
+        const p2 = &face.vertices[1];
+        const p3 = &face.vertices[2];
 
         // std.debug.warn("{} {}\n", .{ (p2.y - p3.y), (p1.x - p3.x) });
         const divisor = (p2.y - p3.y) * (p1.x - p3.x) + (p3.x - p2.x) * (p1.y - p3.y);
@@ -745,7 +757,7 @@ const TexturedPainter = struct {
             v = p1.v * v1 + p2.v * v2 + p3.v * v3;
         }
 
-        const pixCol = exampleTex.sample(u, v);
+        const pixCol = face.texture.sample(u, v);
         if (pixCol == 0x00)
             return;
 
