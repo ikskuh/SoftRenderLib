@@ -2,15 +2,12 @@ const std = @import("std");
 const SDL = @import("sdl2");
 const zgl = @import("zgl");
 
-const Quality = enum {
-    fast,
-    beautiful,
-};
+const rasterizer = @import("rasterizer.zig");
 
 const quality: Quality = .fast;
 const multithreading: ?comptime_int = 8;
 
-const level_file = "assets/lost_empire";
+const level_file = "assets/terrain";
 
 const DepthType = u32;
 
@@ -20,167 +17,10 @@ const screen = struct {
     const scaler = 1;
     const width = 800;
     const height = 480;
-    var pixels: [height][width]PixelType = undefined;
-    var depth: [height][width]DepthType = undefined;
 };
 var palette: [256]u32 = undefined;
 
-fn Texture(comptime Pixel: type) type {
-    return struct {
-        pixels: []const PixelType,
-        width: usize,
-        height: usize,
-
-        fn sample(tex: @This(), u: f32, v: f32) PixelType {
-            const x = @rem(@floatToInt(usize, @floor(@intToFloat(f32, tex.width) * u)), tex.width);
-            const y = @rem(@floatToInt(usize, @floor(@intToFloat(f32, tex.height) * v)), tex.height);
-            return tex.pixels[x + tex.width * y];
-        }
-    };
-}
-
-var exampleTex = Texture(PixelType){
-    .width = 8,
-    .height = 8,
-    .pixels = &[_]u8{
-        15, 15, 15, 15, 15, 15, 15, 15,
-        15, 8,  6,  8,  6,  8,  6,  15,
-        15, 6,  8,  6,  8,  6,  8,  15,
-        15, 8,  6,  11, 11, 8,  6,  15,
-        15, 6,  8,  11, 11, 6,  8,  15,
-        15, 8,  6,  8,  6,  8,  6,  15,
-        15, 6,  8,  6,  8,  6,  8,  15,
-        15, 15, 15, 15, 15, 15, 15, 15,
-    },
-};
-
-// pre-optimization
-// best time:  28.146µs
-// avg time:   86.754µs
-// worst time: 3445.271µs
-
-// post-optimization
-// best time:  22.489µs
-// avg time:   70.050µs
-// worst time: 305.346µs
-
-// post-optimization 2
-// best time:  8.242µs
-// avg time:   46.342µs
-// worst time: 170.343µs
-
-const Vertex = struct {
-    x: i32,
-    y: i32,
-    z: f32 = 0,
-    u: f32 = 0,
-    v: f32 = 0,
-    color: u8 = 0,
-};
-
-const Face = struct {
-    texture: *Texture(PixelType),
-    vertices: [3]Vertex,
-
-    pub fn toPolygon(face: Face) [3]Point {
-        return [3]Point{
-            .{ .x = face.vertices[0].x, .y = face.vertices[0].y },
-            .{ .x = face.vertices[1].x, .y = face.vertices[1].y },
-            .{ .x = face.vertices[2].x, .y = face.vertices[2].y },
-        };
-    }
-};
-
-const RenderSystem = if (multithreading) |core_count|
-    struct {
-        const Queue = std.atomic.Queue(Face);
-
-        const RenderWorker = struct {
-            queue: *Queue,
-            thread: *std.Thread,
-            shutdown: bool,
-        };
-
-        var plenty_of_memory: []u8 = undefined;
-        var queue: Queue = undefined;
-        var processedPolyCount: usize = 0;
-        var expectedPolyCount: usize = 0;
-
-        var workers: [core_count]RenderWorker = undefined;
-
-        var fixed_buffer_allocator: std.heap.ThreadSafeFixedBufferAllocator = undefined;
-        var allocator = &fixed_buffer_allocator.allocator;
-
-        fn init() !void {
-            plenty_of_memory = try std.heap.page_allocator.alloc(u8, 16 * 1024 * 1024); // 16 MB polygon space
-            fixed_buffer_allocator = std.heap.ThreadSafeFixedBufferAllocator.init(plenty_of_memory);
-
-            queue = Queue.init();
-
-            for (workers) |*loop_worker| {
-                loop_worker.* = RenderWorker{
-                    .queue = &queue,
-                    .thread = undefined,
-                    .shutdown = false,
-                };
-                loop_worker.thread = try std.Thread.spawn(loop_worker, struct {
-                    fn doWork(worker: *RenderWorker) void {
-                        while (!worker.shutdown) {
-                            while (worker.queue.get()) |job| {
-                                paintTriangle(job.data.toPolygon(), job.data, TexturedPainter.paint);
-                                _ = @atomicRmw(usize, &processedPolyCount, .Add, 1, .SeqCst);
-                            }
-                            std.time.sleep(1);
-                        }
-                    }
-                }.doWork);
-            }
-        }
-
-        fn beginFrame() void {
-            @atomicStore(usize, &processedPolyCount, 0, .Release);
-            expectedPolyCount = 0;
-            @atomicStore(usize, &fixed_buffer_allocator.end_index, 0, .Release);
-        }
-
-        fn renderPolygon(face: Face) void {
-            const node = allocator.create(Queue.Node) catch unreachable;
-            node.* = Queue.Node{
-                .prev = undefined,
-                .next = undefined,
-                .data = face,
-            };
-            queue.put(node);
-
-            expectedPolyCount += 1;
-        }
-
-        fn endFrame() void {
-            while (@atomicLoad(usize, &processedPolyCount, .Acquire) != expectedPolyCount) {
-                std.time.sleep(1);
-            }
-        }
-
-        fn deinit() void {
-            std.heap.page_allocator.free(plenty_of_memory);
-        }
-    }
-else
-    struct {
-        fn init() error{Dummy}!void {
-            // does nothing
-        }
-
-        fn beginFrame() void {}
-
-        fn renderPolygon(face: Face) void {
-            paintTriangle(face.toPolygon(), face, TexturedPainter.paint);
-        }
-
-        fn endFrame() void {}
-
-        fn deinit() void {}
-    };
+var exampleTex: rasterizer.Texture(PixelType) = undefined;
 
 pub fn gameMain() !void {
     try SDL.init(.{
@@ -282,8 +122,21 @@ pub fn gameMain() !void {
         .position = .{ .x = 0, .y = 0, .z = 0 },
     };
 
-    try RenderSystem.init();
-    defer RenderSystem.deinit();
+    var backBuffer = try rasterizer.Texture(u8).init(std.heap.c_allocator, screen.width, screen.height);
+    defer backBuffer.deinit();
+
+    var depthBuffer = try rasterizer.Texture(u32).init(std.heap.c_allocator, screen.width, screen.height);
+    defer depthBuffer.deinit();
+
+    const Context = rasterizer.Context(u8, .beautiful, null);
+
+    // a bit weird construct, but this is required because
+    // result location isn't working right yet.
+    var softwareRenderer: Context = undefined;
+    try softwareRenderer.init();
+    defer softwareRenderer.deinit();
+
+    try softwareRenderer.setRenderTarget(&backBuffer, &depthBuffer);
 
     var fcount: usize = 0;
     mainLoop: while (true) : (fcount += 1) {
@@ -325,16 +178,9 @@ pub fn gameMain() !void {
 
         const angle = 0.0007 * @intToFloat(f32, SDL.getTicks());
 
-        for (screen.pixels) |*row| {
-            for (row) |*pix| {
-                pix.* = 0;
-            }
-        }
-        for (screen.depth) |*row| {
-            for (row) |*depth| {
-                @atomicStore(DepthType, depth, std.math.maxInt(DepthType), .Release);
-            }
-        }
+        backBuffer.fill(0); // Fill with "background/transparent"
+
+        depthBuffer.fill(std.math.maxInt(u32));
 
         const persp = zgl.math3d.Mat4.createPerspective(
             60.0 * std.math.tau / 360.0,
@@ -347,14 +193,13 @@ pub fn gameMain() !void {
 
         var timer = try std.time.Timer.start();
 
-        _ = screen.pixels;
-
         var visible_polycount: usize = 0;
         var total_polycount: usize = 0;
 
         {
-            RenderSystem.beginFrame();
-            defer RenderSystem.endFrame();
+            softwareRenderer.beginFrame();
+
+            defer softwareRenderer.endFrame();
 
             const world = zgl.math3d.Mat4.identity; // (5.0 * worldX, 0.0, 5.0 * worldZ); // createAngleAxis(.{ .x = 0, .y = 1, .z = 0 }, angle);
 
@@ -373,7 +218,7 @@ pub fn gameMain() !void {
 
                     total_polycount += 1;
 
-                    var face = Face{
+                    var face = rasterizer.Face(u8){
                         .vertices = undefined,
                         .texture = &exampleTex,
                     };
@@ -420,9 +265,7 @@ pub fn gameMain() !void {
 
                     visible_polycount += 1;
 
-                    RenderSystem.renderPolygon(face);
-
-                    // paintTriangle(makePolygon(poly), poly, TexturedPainter.paint);
+                    try softwareRenderer.renderPolygonTextured(face);
                 }
             }
         }
@@ -450,7 +293,7 @@ pub fn gameMain() !void {
             var rgbaScreen: [screen.height][screen.width]u32 = undefined;
             for (rgbaScreen) |*row, y| {
                 for (row) |*pix, x| {
-                    pix.* = palette[screen.pixels[y][x]];
+                    pix.* = palette[backBuffer.getPixel(x, y)];
                 }
             }
             try texture.update(@sliceToBytes(rgbaScreen[0..]), screen.width * 4, null);
@@ -511,267 +354,6 @@ pub fn gameMain() !void {
     std.debug.warn("avg time:   {d: >10.3}µs\n", .{totalTime / totalFrames});
     std.debug.warn("worst time: {d: >10.3}µs\n", .{worstTime});
 }
-
-fn paintPixel(x: i32, y: i32, color: u8) void {
-    if (x >= 0 and y >= 0 and x < screen.width and y < screen.height) {
-        paintPixelUnsafe(x, y, color);
-    }
-}
-
-fn paintPixelUnsafe(x: i32, y: i32, color: u8) void {
-    screen.pixels[@intCast(usize, y)][@intCast(usize, x)] = color;
-}
-
-fn paintLine(x0: i32, y0: i32, x1: i32, y1: i32, color: u8) void {
-    var dx = std.math.absInt(x1 - x0) catch unreachable;
-    var sx = if (x0 < x1) @as(i32, 1) else -1;
-    var dy = -(std.math.absInt(y1 - y0) catch unreachable);
-    var sy = if (y0 < y1) @as(i32, 1) else -1;
-    var err = dx + dy; // error value e_xy
-
-    var x = x0;
-    var y = y0;
-
-    while (true) {
-        paintPixel(x, y, color);
-        if (x == x1 and y == y1)
-            break;
-        const e2 = 2 * err;
-        if (e2 > dy) { // e_xy+e_x > 0
-            err += dy;
-            x += sx;
-        }
-        if (e2 < dx) { // e_xy+e_y < 0
-            err += dx;
-            y += sy;
-        }
-    }
-}
-
-const Point = struct {
-    x: i32,
-    y: i32,
-};
-
-fn paintTriangle(points: [3]Point, context: var, painter: fn (x: i32, y: i32, ctx: @TypeOf(context)) void) void {
-    var localPoints = points;
-    std.sort.sort(
-        Point,
-        &localPoints,
-        struct {
-            fn lessThan(lhs: Point, rhs: Point) bool {
-                return lhs.y < rhs.y;
-            }
-        }.lessThan,
-    );
-
-    // Implements two special versions
-    // of painting an up-facing or down-facing triangle with one perfectly horizontal side.
-    const Helper = struct {
-        const Mode = enum {
-            growing,
-            shrinking,
-        };
-        fn paintHalfTriangle(comptime mode: Mode, x_left: i32, x_right: i32, x_low: i32, y0: i32, y1: i32, context0: var, painter0: fn (x: i32, y: i32, ctx: @TypeOf(context0)) void) void {
-            if (y0 >= screen.height or y1 < 0)
-                return;
-            const totalY = y1 - y0;
-            std.debug.assert(totalY > 0);
-
-            var xa = if (mode == .shrinking) std.math.min(x_left, x_right) else x_low;
-            var xb = if (mode == .shrinking) std.math.max(x_left, x_right) else x_low;
-
-            const dx_a = if (mode == .shrinking) x_low - xa else std.math.min(x_left, x_right) - x_low;
-            const dx_b = if (mode == .shrinking) x_low - xb else std.math.max(x_left, x_right) - x_low;
-
-            const sx_a = if (dx_a < 0) @as(i32, -1) else 1;
-            const sx_b = if (dx_b < 0) @as(i32, -1) else 1;
-
-            const de_a = std.math.fabs(@intToFloat(f32, dx_a) / @intToFloat(f32, totalY));
-            const de_b = std.math.fabs(@intToFloat(f32, dx_b) / @intToFloat(f32, totalY));
-
-            var e_a: f32 = 0;
-            var e_b: f32 = 0;
-
-            var sy = y0;
-            while (sy <= std.math.min(screen.height - 1, y1)) : (sy += 1) {
-                if (sy >= 0) {
-                    var x_s = std.math.max(xa, 0);
-                    const x_e = std.math.min(xb, screen.width - 1);
-                    while (x_s <= x_e) : (x_s += 1) {
-                        painter0(x_s, sy, context0);
-                    }
-                }
-
-                e_a += de_a;
-                e_b += de_b;
-
-                if (e_a >= 0.5) {
-                    const d = @floor(e_a);
-                    xa += @floatToInt(i32, d) * sx_a;
-                    e_a -= d;
-                }
-
-                if (e_b >= 0.5) {
-                    const d = @floor(e_b);
-                    xb += @floatToInt(i32, d) * sx_b;
-                    e_b -= d;
-                }
-            }
-        }
-
-        fn paintUpperTriangle(x00: i32, x01: i32, x1: i32, y0: i32, y1: i32, ctx: var, painter0: fn (x: i32, y: i32, _ctx: @TypeOf(ctx)) void) void {
-            paintHalfTriangle(.shrinking, x00, x01, x1, y0, y1, ctx, painter0);
-        }
-        fn paintLowerTriangle(x0: i32, x10: i32, x11: i32, y0: i32, y1: i32, ctx: var, painter0: fn (x: i32, y: i32, _ctx: @TypeOf(ctx)) void) void {
-            paintHalfTriangle(.growing, x10, x11, x0, y0, y1, ctx, painter0);
-        }
-    };
-
-    if (localPoints[0].y == localPoints[1].y and localPoints[0].y == localPoints[2].y) {
-        // this is actually a flat line, nothing to draw here
-        return;
-    }
-
-    if (localPoints[0].y == localPoints[1].y) {
-        // triangle shape:
-        // o---o
-        //  \ /
-        //   o
-        Helper.paintUpperTriangle(
-            localPoints[0].x,
-            localPoints[1].x,
-            localPoints[2].x,
-            localPoints[0].y,
-            localPoints[2].y,
-            context,
-            painter,
-        );
-    } else if (localPoints[1].y == localPoints[2].y) {
-        // triangle shape:
-        //   o
-        //  / \
-        // o---o
-        Helper.paintLowerTriangle(
-            localPoints[0].x,
-            localPoints[1].x,
-            localPoints[2].x,
-            localPoints[0].y,
-            localPoints[1].y,
-            context,
-            painter,
-        );
-    } else {
-        // non-straightline triangle
-        //    o
-        //   / \
-        //  o---\
-        //   \  |
-        //    \ \
-        //     \|
-        //      o
-        const y0 = localPoints[0].y;
-        const y1 = localPoints[1].y;
-        const y2 = localPoints[2].y;
-
-        const deltaY01 = y1 - y0;
-        const deltaY12 = y2 - y1;
-        const deltaY02 = y2 - y0;
-        std.debug.assert(deltaY01 > 0);
-        std.debug.assert(deltaY12 > 0);
-
-        // std.debug.warn("{d} * ({d} - {d}) / {d}\n", .{ deltaY01, localPoints[2].x, localPoints[0].x, deltaY02 });
-        const pHelp: Point = .{
-            .x = localPoints[0].x + @divFloor(deltaY01 * (localPoints[2].x - localPoints[0].x), deltaY02),
-            .y = y1,
-        };
-
-        Helper.paintLowerTriangle(
-            localPoints[0].x,
-            localPoints[1].x,
-            pHelp.x,
-            localPoints[0].y,
-            localPoints[1].y,
-            context,
-            painter,
-        );
-
-        Helper.paintUpperTriangle(
-            localPoints[1].x,
-            pHelp.x,
-            localPoints[2].x,
-            localPoints[1].y,
-            localPoints[2].y,
-            context,
-            painter,
-        );
-    }
-}
-
-const TexturedPainter = struct {
-    fn clamp(v: f32, min: f32, max: f32) f32 {
-        return std.math.min(max, std.math.max(min, v));
-    }
-
-    fn paint(x: i32, y: i32, face: Face) void {
-        const p1 = &face.vertices[0];
-        const p2 = &face.vertices[1];
-        const p3 = &face.vertices[2];
-
-        // std.debug.warn("{} {}\n", .{ (p2.y - p3.y), (p1.x - p3.x) });
-        const divisor = (p2.y - p3.y) * (p1.x - p3.x) + (p3.x - p2.x) * (p1.y - p3.y);
-        if (divisor == 0)
-            return;
-
-        var v1 = clamp(@intToFloat(f32, (p2.y - p3.y) * (x - p3.x) + (p3.x - p2.x) * (y - p3.y)) / @intToFloat(f32, divisor), 0.0, 1.0);
-
-        var v2 = clamp(@intToFloat(f32, (p3.y - p1.y) * (x - p3.x) + (p1.x - p3.x) * (y - p3.y)) / @intToFloat(f32, divisor), 0.0, 1.0);
-
-        var v3 = clamp(1.0 - v2 - v1, 0.0, 1.0);
-
-        if (quality != .fast) {
-            var sum = v1 + v2 + v3;
-            v1 /= sum;
-            v2 /= sum;
-            v3 /= sum;
-        }
-
-        const z = p1.z * v1 + p2.z * v2 + p3.z * v3;
-        if (z < 0.0 or z > 1.0)
-            return;
-
-        const int_z = @floatToInt(DepthType, @floor(@floatToInt(f32, std.math.maxInt(DepthType) - 1) * @as(f64, z)));
-
-        const depth = &screen.depth[@intCast(usize, y)][@intCast(usize, x)];
-
-        if (@atomicLoad(DepthType, depth, .Acquire) < int_z)
-            return;
-
-        var u: f32 = undefined;
-        var v: f32 = undefined;
-        if (quality == .beautiful) {
-            u = z * ((p1.u / z) * v1 + (p2.u / z) * v2 + (p3.u / z) * v3);
-            v = z * ((p1.v / z) * v1 + (p2.v / z) * v2 + (p3.v / z) * v3);
-        } else {
-            u = p1.u * v1 + p2.u * v2 + p3.u * v3;
-            v = p1.v * v1 + p2.v * v2 + p3.v * v3;
-        }
-
-        const pixCol = face.texture.sample(u, v);
-        if (pixCol == 0x00)
-            return;
-
-        _ = @atomicRmw(DepthType, depth, .Min, int_z, .SeqCst); // we don't care for the previous value
-        if (@atomicLoad(DepthType, depth, .Acquire) != int_z)
-            return;
-
-        // if (depth.* < int_z)
-        //     return;
-        // depth.* = int_z;
-
-        paintPixelUnsafe(x, y, pixCol);
-    }
-};
 
 fn angleToVec3(pan: f32, tilt: f32) zgl.math3d.Vec3 {
     return .{
