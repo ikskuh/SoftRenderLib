@@ -218,7 +218,12 @@ pub fn Context(comptime PixelType: type, quality: Quality, comptime numThreads: 
                             fn doWork(worker: *RenderWorker) void {
                                 while (!worker.shutdown) {
                                     while (worker.queue.get()) |job| {
-                                        paintTriangle(job.data.face.toPolygon(), job.data, paintTextured);
+                                        paintTriangle(.{
+                                            .left = 0,
+                                            .top = 0,
+                                            .right = @intCast(i32, job.data.context.targetWidth),
+                                            .bottom = @intCast(i32, job.data.context.targetHeight),
+                                        }, job.data.face.toPolygon(), job.data, paintTextured);
                                         _ = @atomicRmw(usize, worker.processedPolyCount, .Add, 1, .SeqCst);
                                     }
                                     std.time.sleep(1);

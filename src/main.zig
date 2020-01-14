@@ -7,7 +7,7 @@ const rasterizer = @import("rasterizer.zig");
 const quality: Quality = .fast;
 const multithreading: ?comptime_int = 8;
 
-const level_file = "assets/terrain";
+const level_file = "assets/lost_empire";
 
 const DepthType = u32;
 
@@ -128,7 +128,7 @@ pub fn gameMain() !void {
     var depthBuffer = try rasterizer.Texture(u32).init(std.heap.c_allocator, screen.width, screen.height);
     defer depthBuffer.deinit();
 
-    const Context = rasterizer.Context(u8, .beautiful, null);
+    const Context = rasterizer.Context(u8, .beautiful, 8);
 
     // a bit weird construct, but this is required because
     // result location isn't working right yet.
